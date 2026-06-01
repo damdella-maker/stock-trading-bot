@@ -1,0 +1,253 @@
+import os
+import telebot
+import requests
+import json
+from datetime import datetime
+import time
+
+# Configuration depuis les variables d'environnement
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+FINNHUB_KEY = os.environ.get('FINNHUB_KEY')
+
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
+# Garder le bot actif
+def keep_alive():
+    """Empêche Render de mettre en veille"""
+    pass
+
+def get_stock_data(ticker):
+    """Obtenir les données d'une action"""
+    try:
+        url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_KEY}"
+        response = requests.get(url)
+        data = response.json()
+        
+        if 'c' not in data or data['c'] == 0:
+            return None
+            
+        price = data['c']
+        previous = data['pc']
+        change = ((price - previous) / previous) * 100 if previous else 0
+        
+        # Score simple
+        score = 50
+        if change > 5: score += 25
+        elif change > 2: score += 15
+        elif change > 0: score += 5
+        
+        return {
+            'ticker': ticker,
+            'price': price,
+            'change': round(change, 2),
+            'score': min(score, 100),
+            'high': data['h'],
+            'low': data['l'],
+            'open': data['o'],
+            'volume': data.get('v', 0)
+        }
+    except Exception as e:
+        print(f"Erreur: {e}")
+        return None
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    welcome = """
+🚀 *BOT DE STOCK PICKING*
+
+✅ Bot actif 24/7
+✅ Analyses en temps réel
+
+*Commandes:*
+📊 /analyse TICKER
+🔥 /top
+📈 /marché
+ℹ️ /aide
+
+*Exemple:*
+/analyse AAPL
+"""
+    bot.reply_to(message, welcome, parse_mode='Markdown')
+
+@bot.message_handler(commands=['aide'])
+def aide(message):
+    help_text = """
+📚 *GUIDE D'UTILISATION*
+
+*SCORES:*
+🟢 80-100 : Achat fort
+🟢 60-79  : Achat
+🟡 40-59  : Surveiller
+🔴 0-39   : Éviter
+
+*GESTION RISQUE:*
+• Max perte : 6€ par trade
+• Stop loss : -5%
+• Take profit 1 : +10%
+• Take profit 2 : +20%
+
+*COMMANDES:*
+/analyse TICKER
+/top
+/marché
+/portfolio
+"""
+    bot.reply_to(message, help_text, parse_mode='Markdown')
+
+@bot.message_handler(commands=['analyse'])
+def analyse(message):
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "❌ Usage: /analyse TICKER\nExemple: /analyse AAPL")
+            return
+        
+        ticker = parts[1].upper()
+        loading = bot.reply_to(message, f"🔄 Analyse de {ticker} en cours...")
+        
+        data = get_stock_data(ticker)
+        
+        if not data:
+            bot.edit_message_text(
+                f"❌ Action {ticker} non trouvée",
+                message.chat.id,
+                loading.message_id
+            )
+            return
+        
+        stars = "⭐" * (data['score'] // 20 + 1)
+        reco = "🟢 ACHAT FORT" if data['score'] >= 80 else "🟢 ACHAT" if data['score'] >= 60 else "🟡 SURVEILLER" if data['score'] >= 40 else "🔴 ÉVITER"
+        
+        result = f"""
+📊 *ANALYSE {ticker}* {stars}
+
+🎯 *Score: {data['score']}/100*
+📈 Recommandation: {reco}
+
+━━━━━━━━━━━━━━━━━━━━━
+
+💰 *PRIX*
+• Actuel: ${data['price']:.2f}
+• Variation: {data['change']:+.2f}%
+• Ouverture: ${data['open']:.2f}
+
+📊 *NIVEAUX*
+• Plus haut: ${data['high']:.2f}
+• Plus bas: ${data['low']:.2f}
+• Volume: {data['volume']:,}
+
+━━━━━━━━━━━━━━━━━━━━━
+
+🛡️ *GESTION RISQUE*
+• Stop Loss (-5%): ${data['price']*0.95:.2f}
+• TP1 (+10%): ${data['price']*1.10:.2f}
+• TP2 (+20%): ${data['price']*1.20:.2f}
+
+━━━━━━━━━━━━━━━━━━━━━
+
+⚠️ Faites vos propres recherches
+"""
+        bot.edit_message_text(
+            result,
+            message.chat.id,
+            loading.message_id,
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Erreur: {str(e)}")
+
+@bot.message_handler(commands=['top'])
+def top(message):
+    loading = bot.reply_to(message, "🔄 Scan des marchés en cours...")
+    
+    stocks = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA']
+    results = []
+    
+    for ticker in stocks:
+        data = get_stock_data(ticker)
+        if data:
+            results.append(data)
+        time.sleep(0.5)
+    
+    results.sort(key=lambda x: x['score'], reverse=True)
+    
+    text = "🏆 *TOP OPPORTUNITÉS*\n\n"
+    for i, s in enumerate(results[:5], 1):
+        emoji = "🟢" if s['score'] >= 60 else "🟡"
+        text += f"{i}. {emoji} *{s['ticker']}* - Score: {s['score']}/100\n"
+        text += f"   💰 ${s['price']:.2f} ({s['change']:+.1f}%)\n\n"
+    
+    text += "━━━━━━━━━━━━━━━━━━━━━\n"
+    text += f"🕐 Mis à jour: {datetime.now().strftime('%H:%M')}"
+    
+    bot.edit_message_text(
+        text,
+        message.chat.id,
+        loading.message_id,
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(commands=['marché'])
+def marche(message):
+    """Aperçu rapide du marché"""
+    loading = bot.reply_to(message, "🔄 Analyse du marché...")
+    
+    # Indices
+    indices = {
+        'SPY': 'S&P 500',
+        'QQQ': 'Nasdaq',
+        'DIA': 'Dow Jones'
+    }
+    
+    text = "📈 *APERÇU DU MARCHÉ*\n\n"
+    
+    for ticker, name in indices.items():
+        data = get_stock_data(ticker)
+        if data:
+            emoji = "🟢" if data['change'] > 0 else "🔴"
+            text += f"{emoji} *{name}*\n"
+            text += f"   ${data['price']:.2f} ({data['change']:+.2f}%)\n\n"
+    
+    text += "━━━━━━━━━━━━━━━━━━━━━\n"
+    text += "Utilisez /top pour les opportunités"
+    
+    bot.edit_message_text(
+        text,
+        message.chat.id,
+        loading.message_id,
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(commands=['portfolio'])
+def portfolio(message):
+    text = """
+💼 *PORTEFEUILLE*
+
+Votre portefeuille est vide.
+
+*Pour commencer :*
+1. Analysez des actions (/analyse)
+2. Comparez les scores (/top)
+3. Investissez sur Trading212
+4. Suivez les performances ici
+
+*Commandes utiles :*
+/analyse TICKER
+/top
+/performance
+"""
+    bot.reply_to(message, text, parse_mode='Markdown')
+
+# Démarrer le bot
+if __name__ == "__main__":
+    print("🤖 Bot démarré sur Render.com")
+    print("✅ En attente de messages...")
+    
+    # Boucle infinie avec reconnexion
+    while True:
+        try:
+            bot.polling(none_stop=True)
+        except Exception as e:
+            print(f"Erreur: {e}")
+            time.sleep(10)

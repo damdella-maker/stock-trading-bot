@@ -15,6 +15,7 @@ from telebot import types
 import sqlite3
 import pytz
 
+# --- Configuration ---
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 FINNHUB_KEY = os.environ.get('FINNHUB_KEY')
 PORT = int(os.environ.get('PORT', 10000))
@@ -24,7 +25,7 @@ bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 DB_PATH = 'trading_bot.db'
 
-# === Base de données ===
+# --- Base de données ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -77,7 +78,7 @@ def add_subscriber(chat_id):
 def get_all_subscribers():
     return [r[0] for r in db_fetchall('SELECT chat_id FROM subscribers')]
 
-# === Liste d'actions (nettoyée) ===
+# --- Watchlist éprouvée (que des titres liquides et bien couverts) ---
 HIGH_GROWTH_STOCKS = [
     'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'AMD', 'NFLX',
     'PLTR', 'COIN', 'MARA', 'RIOT', 'NIO', 'LI', 'RIVN', 'LCID',
@@ -87,21 +88,9 @@ HIGH_GROWTH_STOCKS = [
 ]
 HIGH_GROWTH_STOCKS = list(set(HIGH_GROWTH_STOCKS))
 
-# === Horaires marché US ===
-def is_market_open():
-    try:
-        tz = pytz.timezone('US/Eastern')
-        now_us = datetime.now(tz)
-        if now_us.weekday() >= 5:
-            return False
-        market_open = now_us.replace(hour=9, minute=30, second=0, microsecond=0)
-        market_close = now_us.replace(hour=16, minute=0, second=0, microsecond=0)
-        return market_open <= now_us <= market_close
-    except:
-        return True
-
-# === Fonctions d'accès aux données ===
+# --- Fonctions de données (robustes avec fallback) ---
 def get_current_price_finnhub(ticker):
+    """Essaie Finnhub, retourne le prix ou None."""
     try:
         url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_KEY}"
         resp = requests.get(url, timeout=5).json()
@@ -112,6 +101,7 @@ def get_current_price_finnhub(ticker):
     return None
 
 def get_yahoo_info(ticker):
+    """Retourne les infos Yahoo Finance pour un ticker."""
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
@@ -120,7 +110,10 @@ def get_yahoo_info(ticker):
         return {}
 
 def get_fast_analysis(ticker):
-    """Analyse rapide (prix, volume, score, stop/tp)"""
+    """
+    Analyse rapide : prix (Finnhub > Yahoo), volume, score, stop/tp.
+    Retourne None si impossible d'obtenir un prix.
+    """
     try:
         current_price = get_current_price_finnhub(ticker)
         if not current_price:
@@ -128,6 +121,7 @@ def get_fast_analysis(ticker):
             current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
         else:
             info = get_yahoo_info(ticker)
+
         if not current_price or current_price == 0:
             return None
 
@@ -179,18 +173,23 @@ def get_fast_analysis(ticker):
         return None
 
 def scan_all_movers():
+    """
+    Scan de toutes les actions de la watchlist.
+    Utilise d'abord Finnhub si disponible, sinon Yahoo Finance groupé.
+    Retourne une liste de dicts avec ticker, price, change, volume.
+    """
     movers = []
-    finnhub_ok = False
+    finnhub_works = False
     if FINNHUB_KEY:
         try:
             test_url = f"https://finnhub.io/api/v1/quote?symbol=AAPL&token={FINNHUB_KEY}"
             test_resp = requests.get(test_url, timeout=5).json()
             if 'c' in test_resp and test_resp['c'] > 0:
-                finnhub_ok = True
+                finnhub_works = True
         except:
             pass
 
-    if finnhub_ok:
+    if finnhub_works:
         for ticker in HIGH_GROWTH_STOCKS:
             try:
                 url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_KEY}"
@@ -211,6 +210,7 @@ def scan_all_movers():
                 pass
             time.sleep(0.05)
     else:
+        # Fallback Yahoo Finance groupé (plus rapide et plus fiable)
         tickers = HIGH_GROWTH_STOCKS.copy()
         try:
             data = yf.download(tickers, period='2d', progress=False, group_by='ticker')
@@ -236,6 +236,7 @@ def scan_all_movers():
                         pass
         except Exception as e:
             print(f"Batch yfinance failed: {e}")
+            # Dernier recours : un par un
             for ticker in tickers:
                 try:
                     df = yf.download(ticker, period='2d', progress=False)
@@ -254,7 +255,84 @@ def scan_all_movers():
     movers.sort(key=lambda x: x['change'], reverse=True)
     return movers
 
+def get_company_news(ticker):
+    """Récupère les 5 dernières actualités via Finnhub (7 jours)."""
+    try:
+        today = datetime.now().strftime('%Y-%m-%d')
+        week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+        url = f"https://finnhub.io/api/v1/company-news?symbol={ticker}&from={week_ago}&to={today}&token={FINNHUB_KEY}"
+        resp = requests.get(url, timeout=5).json()
+        if isinstance(resp, list) and len(resp) > 0:
+            return resp[:5]
+        return []
+    except:
+        return []
+
+def analyze_sentiment(news):
+    """Analyse basique du sentiment des titres d'actualités."""
+    positive_words = ['profit', 'growth', 'rise', 'gain', 'buy', 'upgrade', 'beat', 'positive', 'record']
+    negative_words = ['loss', 'decline', 'fall', 'drop', 'sell', 'downgrade', 'miss', 'negative', 'risk']
+    pos_count = 0
+    neg_count = 0
+    for article in news:
+        title = (article.get('headline', '') + ' ' + article.get('summary', '')).lower()
+        pos_count += sum(1 for w in positive_words if w in title)
+        neg_count += sum(1 for w in negative_words if w in title)
+    if pos_count > neg_count:
+        return "🟢 Positif"
+    elif neg_count > pos_count:
+        return "🔴 Négatif"
+    else:
+        return "🟡 Neutre"
+
+def get_detailed_analysis(ticker):
+    """Analyse enrichie : fondamentaux, consensus, actualités."""
+    base = get_fast_analysis(ticker)
+    if not base:
+        return None
+
+    info = get_yahoo_info(ticker)
+
+    # Fondamentaux
+    pe = info.get('trailingPE', info.get('forwardPE', 'N/A'))
+    eps = info.get('trailingEps', 'N/A')
+    roe = info.get('returnOnEquity', 'N/A')
+    if isinstance(roe, (int, float)): roe = f"{roe*100:.1f}%"
+    debt = info.get('debtToEquity', 'N/A')
+    rev_growth = info.get('revenueGrowth', 'N/A')
+    if isinstance(rev_growth, (int, float)): rev_growth = f"{rev_growth*100:.1f}%"
+    margin = info.get('profitMargins', 'N/A')
+    if isinstance(margin, (int, float)): margin = f"{margin*100:.1f}%"
+    market_cap = info.get('marketCap', 0)
+    div_yield = info.get('dividendYield', 'N/A')
+    if isinstance(div_yield, (int, float)): div_yield = f"{div_yield*100:.2f}%"
+
+    # Consensus analystes
+    target_mean = info.get('targetMeanPrice', None)
+    target_high = info.get('targetHighPrice', None)
+    target_low = info.get('targetLowPrice', None)
+    recommendation = info.get('recommendationKey', 'N/A')
+
+    # Actualités
+    news = get_company_news(ticker)
+    sentiment = analyze_sentiment(news) if news else "N/A"
+
+    detailed = {**base,
+                'pe_ratio': pe, 'eps': eps, 'roe': roe,
+                'debt_to_equity': debt, 'revenue_growth': rev_growth,
+                'profit_margin': margin, 'market_cap': market_cap,
+                'dividend_yield': div_yield,
+                'target_mean': target_mean, 'target_high': target_high,
+                'target_low': target_low, 'recommendation': recommendation,
+                'news': news, 'sentiment': sentiment,
+                'sector': info.get('sector', base['sector']),
+                'industry': info.get('industry', base['industry']),
+                'name': info.get('shortName', info.get('longName', ticker)) or base['name'],
+                'isin': info.get('isin', base['isin'])}
+    return detailed
+
 def get_tomorrow_recommendations():
+    """Top 5 pour demain basé sur momentum/volume."""
     recommendations = []
     for ticker in HIGH_GROWTH_STOCKS:
         try:
@@ -283,8 +361,8 @@ def get_tomorrow_recommendations():
             recommendations.append({
                 'ticker': ticker, 'name': str(name), 'sector': sector,
                 'price': round(current, 3), 'change_today': round(change_today, 2),
-                'change_5d': 0, 'rsi': 0, 'vol_ratio': round(vol_ratio, 1),
-                'score': score, 'stop': stop, 'tp1': tp1, 'tp2': tp2,
+                'vol_ratio': round(vol_ratio, 1), 'score': score,
+                'stop': stop, 'tp1': tp1, 'tp2': tp2,
                 'potential': potential, 'trend': 'N/A'
             })
         except:
@@ -299,108 +377,40 @@ def send_alert_to_all(msg):
         except:
             pass
 
-# ===== NOUVELLES FONCTIONS D'ANALYSE ENRICHIE =====
-def get_company_news(ticker):
+# --- Gestion du marché US ---
+def is_market_open():
     try:
-        today = datetime.now().strftime('%Y-%m-%d')
-        week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-        url = f"https://finnhub.io/api/v1/company-news?symbol={ticker}&from={week_ago}&to={today}&token={FINNHUB_KEY}"
-        resp = requests.get(url, timeout=5).json()
-        if isinstance(resp, list) and len(resp) > 0:
-            return resp[:5]
-        return []
+        tz = pytz.timezone('US/Eastern')
+        now_us = datetime.now(tz)
+        if now_us.weekday() >= 5:
+            return False
+        market_open = now_us.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close = now_us.replace(hour=16, minute=0, second=0, microsecond=0)
+        return market_open <= now_us <= market_close
     except:
-        return []
+        return True
 
-def analyze_sentiment(news):
-    positive_words = ['profit', 'growth', 'rise', 'gain', 'buy', 'upgrade', 'beat', 'positive', 'record']
-    negative_words = ['loss', 'decline', 'fall', 'drop', 'sell', 'downgrade', 'miss', 'negative', 'risk']
-    pos_count = 0
-    neg_count = 0
-    for article in news:
-        title = (article.get('headline', '') + ' ' + article.get('summary', '')).lower()
-        pos_count += sum(1 for w in positive_words if w in title)
-        neg_count += sum(1 for w in negative_words if w in title)
-    if pos_count > neg_count:
-        return "🟢 Positif"
-    elif neg_count > pos_count:
-        return "🔴 Négatif"
-    else:
-        return "🟡 Neutre"
-
-def get_detailed_analysis(ticker):
-    """Analyse enrichie : utilise get_fast_analysis pour le prix, puis ajoute fondamentaux/news"""
-    base = get_fast_analysis(ticker)
-    if not base:
-        return None
-
-    try:
-        info = get_yahoo_info(ticker)
-    except:
-        info = {}
-
-    # Fondamentaux
-    pe_ratio = info.get('trailingPE', info.get('forwardPE', 'N/A'))
-    eps = info.get('trailingEps', 'N/A')
-    roe = info.get('returnOnEquity', 'N/A')
-    if roe != 'N/A' and isinstance(roe, (int, float)):
-        roe = f"{roe * 100:.1f}%"
-    debt_to_equity = info.get('debtToEquity', 'N/A')
-    revenue_growth = info.get('revenueGrowth', 'N/A')
-    if revenue_growth != 'N/A' and isinstance(revenue_growth, (int, float)):
-        revenue_growth = f"{revenue_growth * 100:.1f}%"
-    profit_margin = info.get('profitMargins', 'N/A')
-    if profit_margin != 'N/A' and isinstance(profit_margin, (int, float)):
-        profit_margin = f"{profit_margin * 100:.1f}%"
-    market_cap = info.get('marketCap', 0)
-    dividend_yield = info.get('dividendYield', 'N/A')
-    if dividend_yield != 'N/A' and dividend_yield is not None and isinstance(dividend_yield, (int, float)):
-        dividend_yield = f"{dividend_yield * 100:.2f}%"
-
-    target_mean = info.get('targetMeanPrice', None)
-    target_high = info.get('targetHighPrice', None)
-    target_low = info.get('targetLowPrice', None)
-    recommendation = info.get('recommendationKey', 'N/A')
-
-    news = get_company_news(ticker)
-    sentiment = analyze_sentiment(news) if news else "N/A"
-
-    # Fusion avec les données de base
-    detailed = {**base,
-                'pe_ratio': pe_ratio, 'eps': eps, 'roe': roe,
-                'debt_to_equity': debt_to_equity, 'revenue_growth': revenue_growth,
-                'profit_margin': profit_margin, 'market_cap': market_cap,
-                'dividend_yield': dividend_yield,
-                'target_mean': target_mean, 'target_high': target_high,
-                'target_low': target_low, 'recommendation': recommendation,
-                'news': news, 'sentiment': sentiment,
-                'sector': info.get('sector', base['sector']),
-                'industry': info.get('industry', base['industry']),
-                'name': info.get('shortName', info.get('longName', ticker)) or base['name'],
-                'isin': info.get('isin', base['isin'])}
-    return detailed
-
-# ===== COMMANDES =====
+# ==================== COMMANDES TELEGRAM ====================
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     add_subscriber(message.chat.id)
-    msg = "🚀 *TRADER PRO V8 - ENRICHIE*\n\n"
-    msg += "✅ Analyse détaillée avec fondamentaux, actualités et consensus\n\n"
+    msg = "🚀 *TRADER PRO - RÉVOLUTIONNAIRE*\n\n"
+    msg += "✅ Analyse enrichie multi-sources (Yahoo, Finnhub)\n\n"
     msg += "📊 /rapide - Top gainers\n"
-    msg += "📊 /scan - Scan filtre\n"
+    msg += "📊 /scan - Scan avec votre filtre\n"
     msg += "📊 /scan20 - Potentiel 20-50%\n"
     msg += "📊 /scan50 - Potentiel >50%\n"
-    msg += "📊 /allmovers - Tous mouvements\n"
+    msg += "📊 /allmovers - Tous les mouvements\n"
     msg += "📊 /analyse TICKER - Rapport complet enrichi\n"
-    msg += "💥 /explosive - Top opportunites\n"
-    msg += "📈 /marche - Indices\n"
-    msg += "📅 /demain - Top 5 demain\n"
-    msg += "📝 /achat TICKER PRIX MONTANT\n"
+    msg += "💥 /explosive - Top opportunités\n"
+    msg += "📈 /marche - Indices en direct\n"
+    msg += "📅 /demain - Top 5 pour demain\n"
+    msg += "📝 /achat TICKER PRIX MONTANT - Achat rapide\n"
     msg += "💼 /portfolio - Positions\n"
     msg += "📋 /historique - Historique\n"
     msg += "📊 /stats - Performance\n"
-    msg += "⚙️ /setrange MIN MAX - Filtre\n"
-    msg += "📚 /aide - Guide\n"
+    msg += "⚙️ /setrange MIN MAX - Votre filtre\n"
+    msg += "📚 /aide - Guide complet\n"
     msg += "🏓 /ping - Test de vie"
     bot.reply_to(message, msg, parse_mode='Markdown')
 
@@ -441,15 +451,15 @@ def cmd_setrange(message):
 @bot.message_handler(commands=['rapide'])
 def cmd_rapide(message):
     if not is_market_open():
-        bot.reply_to(message, "⚠️ Marché US fermé. Affichage des dernières données disponibles.")
+        bot.reply_to(message, "⚠️ Marché US fermé. Données de la dernière séance.")
     bot.send_chat_action(message.chat.id, 'typing')
     movers = scan_all_movers()
     if not movers:
-        bot.reply_to(message, "❌ Aucune donnée")
+        bot.reply_to(message, "❌ Aucune donnée. Vérifiez votre connexion ou la clé Finnhub.")
         return
     gainers = [m for m in movers if m['change'] > 0][:15]
     if not gainers:
-        bot.reply_to(message, "🔴 Aucune action en hausse")
+        bot.reply_to(message, "🔴 Aucune action en hausse détectée.")
         return
     msg = "⚡ *TOP GAINERS*\n\n"
     for i, m in enumerate(gainers, 1):
@@ -467,7 +477,7 @@ def cmd_allmovers(message):
     bot.send_chat_action(message.chat.id, 'typing')
     movers = scan_all_movers()
     if not movers:
-        bot.reply_to(message, "❌ Aucune donnée")
+        bot.reply_to(message, "❌ Aucune donnée.")
         return
     gainers = [m for m in movers if m['change'] > 0][:10]
     losers = [m for m in movers if m['change'] < 0][:5]
@@ -494,11 +504,11 @@ def cmd_scan(message):
         prefs = db_fetchone('SELECT min_potential FROM subscribers WHERE chat_id=?', (message.chat.id,))
         mn = prefs[0] if prefs else 3
     bot.send_chat_action(message.chat.id, 'typing')
-    wait_msg = bot.reply_to(message, "🔍 *Scan...*", parse_mode='Markdown')
+    wait_msg = bot.reply_to(message, "🔍 *Scan en cours...*", parse_mode='Markdown')
     all_movers = scan_all_movers()
     results = [m for m in all_movers if m['change'] >= mn]
     if not results:
-        bot.edit_message_text(f"🔍 Aucune action > {mn}%", chat_id=message.chat.id, message_id=wait_msg.message_id)
+        bot.edit_message_text(f"🔍 Aucune action au-dessus de {mn}%", chat_id=message.chat.id, message_id=wait_msg.message_id)
         return
     msg = f"🔥 *ACTIONS > {mn}%*\n\n"
     for i, m in enumerate(results[:10], 1):
@@ -513,13 +523,13 @@ def cmd_scan(message):
 def cmd_demain(message):
     bot.send_chat_action(message.chat.id, 'typing')
     wait_msg = bot.reply_to(message, "🔮 *Analyse pour demain...*", parse_mode='Markdown')
-    recommendations = get_tomorrow_recommendations()
-    if not recommendations:
+    recs = get_tomorrow_recommendations()
+    if not recs:
         bot.edit_message_text("❌ Analyse impossible", chat_id=message.chat.id, message_id=wait_msg.message_id)
         return
     tomorrow = (datetime.now() + timedelta(days=1)).strftime('%d/%m/%Y')
     msg = f"🔮 *TOP 5 POUR DEMAIN - {tomorrow}*\n\n"
-    for i, r in enumerate(recommendations, 1):
+    for i, r in enumerate(recs, 1):
         if r['score'] >= 80: stars, reco = "⭐⭐⭐⭐⭐", "ACHAT FORT"
         elif r['score'] >= 65: stars, reco = "⭐⭐⭐⭐", "ACHAT"
         elif r['score'] >= 50: stars, reco = "⭐⭐⭐", "SURVEILLER"
@@ -528,13 +538,13 @@ def cmd_demain(message):
         msg += f"   Score: {r['score']}/100 | 💰 ${r['price']:.3f}\n"
         msg += f"   📈 +{r['change_today']}% | Vol: {r['vol_ratio']}x\n"
         msg += f"   🛑 Stop: ${r['stop']} | 🎯 TP: ${r['tp1']}\n\n"
-    msg += "📊 /analyse TICKER pour le detail"
+    msg += "📊 /analyse TICKER pour le détail complet"
     bot.edit_message_text(msg, chat_id=message.chat.id, message_id=wait_msg.message_id, parse_mode='Markdown')
 
 @bot.message_handler(commands=['analyse'])
 def cmd_analyse(message):
     if not is_market_open():
-        bot.reply_to(message, "⚠️ Marché fermé. Données potentiellement décalées.")
+        bot.reply_to(message, "⚠️ Marché fermé. Les données peuvent être celles de la veille.")
     try:
         ticker = message.text.split()[1].upper()
     except:
@@ -544,7 +554,7 @@ def cmd_analyse(message):
     bot.send_chat_action(message.chat.id, 'typing')
     a = get_detailed_analysis(ticker)
     if not a:
-        bot.reply_to(message, f"❌ Données indisponibles pour {ticker}")
+        bot.reply_to(message, f"❌ Données indisponibles pour {ticker}. Vérifiez le ticker ou réessayez plus tard.")
         return
 
     msg = f"📊 *{a['name']} ({a['ticker']})*\n"
@@ -582,7 +592,6 @@ def cmd_analyse(message):
         msg += f"📰 *Actualités récentes (7j) - Sentiment {a['sentiment']} :*\n"
         for i, article in enumerate(a['news'][:3], 1):
             headline = article.get('headline', 'Pas de titre')[:80]
-            source = article.get('source', '')
             msg += f"  {i}. {headline}\n"
         msg += "\n"
 
@@ -595,7 +604,7 @@ def cmd_analyse(message):
     )
     bot.reply_to(message, msg, parse_mode='Markdown', reply_markup=markup)
 
-# Callbacks & commandes de trading
+# --- Callbacks et commandes de trading (achat, vente, portfolio...) ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith('buy_'))
 def handle_buy(call):
     _, ticker, price = call.data.split('_')
@@ -662,9 +671,9 @@ def cmd_achat(message):
     if curr:
         var = ((curr - buy_price) / buy_price) * 100
         status = "🟢" if var >= 0 else "🔴"
-        msg = f"✅ *ACHAT ENREGISTRE*\n📊 {ticker}\n💰 {amount:.2f}€ | ${buy_price:.3f}\n📦 {qty:.4f} actions\n{status} Prix actuel: ${curr:.3f} ({var:+.2f}%)\n\n🛑 Stop: ${stop} | 🎯 TP1: ${tp1}"
+        msg = f"✅ *ACHAT ENREGISTRÉ*\n📊 {ticker}\n💰 {amount:.2f}€ | ${buy_price:.3f}\n📦 {qty:.4f} actions\n{status} Prix actuel: ${curr:.3f} ({var:+.2f}%)\n\n🛑 Stop: ${stop} | 🎯 TP1: ${tp1}"
     else:
-        msg = f"✅ *ACHAT ENREGISTRE*\n📊 {ticker}\n💰 {amount:.2f}€ | ${buy_price:.3f}\n📦 {qty:.4f} actions\n\n🛑 Stop: ${stop} | 🎯 TP1: ${tp1}"
+        msg = f"✅ *ACHAT ENREGISTRÉ*\n📊 {ticker}\n💰 {amount:.2f}€ | ${buy_price:.3f}\n📦 {qty:.4f} actions\n\n🛑 Stop: ${stop} | 🎯 TP1: ${tp1}"
     bot.reply_to(message, msg, parse_mode='Markdown')
 
 @bot.message_handler(commands=['explosive'])
@@ -673,9 +682,9 @@ def cmd_explosive(message):
     movers = scan_all_movers()
     gainers = [m for m in movers if m['change'] > 10][:10]
     if not gainers:
-        bot.reply_to(message, "Aucune opportunité explosive")
+        bot.reply_to(message, "Aucune opportunité explosive détectée.")
         return
-    msg = "💥 *TOP OPPORTUNITES*\n\n"
+    msg = "💥 *TOP OPPORTUNITÉS EXPLOSIVES*\n\n"
     for m in gainers:
         msg += f"🔥 *{m['ticker']}* +{m['change']}% | 💰 ${m['price']:.3f}\n"
     bot.reply_to(message, msg, parse_mode='Markdown')
@@ -683,7 +692,7 @@ def cmd_explosive(message):
 @bot.message_handler(commands=['marche'])
 def cmd_marche(message):
     bot.send_chat_action(message.chat.id, 'typing')
-    msg = "📈 *MARCHE*\n\n"
+    msg = "📈 *MARCHÉ EN DIRECT*\n\n"
     for t, n in {'^GSPC': 'S&P500', '^IXIC': 'Nasdaq', '^DJI': 'Dow', '^VIX': 'VIX'}.items():
         try:
             h = yf.Ticker(t).history(period='2d')
@@ -703,16 +712,16 @@ def cmd_portfolio(message):
         bot.reply_to(message, "📭 Portefeuille vide")
         return
     msg = "💼 *PORTEFEUILLE*\n\n"
-    ti = tc = 0
+    total_inv = total_val = 0
     for r in rows:
         curr = get_current_price_finnhub(r[2]) or get_yahoo_info(r[2]).get('currentPrice', r[3])
         val = r[4] * (curr / r[3])
         pnl = val - r[5]
-        ti += r[5]
-        tc += val
+        total_inv += r[5]
+        total_val += val
         emoji = "🟢" if pnl >= 0 else "🔴"
         msg += f"{emoji} *{r[2]}* {r[4]:.4f} act\n   {r[5]:.2f}€ → {val:.2f}€ | {pnl:+.2f}€\n\n"
-    msg += f"━━━━━━\n💰 Total: {tc:.2f}€ | P&L: {tc-ti:+.2f}€"
+    msg += f"━━━━━━\n💰 Total: {total_val:.2f}€ | P&L: {total_val-total_inv:+.2f}€"
     bot.reply_to(message, msg, parse_mode='Markdown')
 
 @bot.message_handler(commands=['vendre'])
@@ -724,7 +733,7 @@ def cmd_vendre(message):
         return
     row = db_fetchone("SELECT * FROM positions WHERE chat_id=? AND ticker=? AND status='open'", (message.chat.id, ticker))
     if not row:
-        bot.reply_to(message, "❌ Aucune position")
+        bot.reply_to(message, "❌ Aucune position trouvée")
         return
     curr = get_current_price_finnhub(ticker) or get_yahoo_info(ticker).get('currentPrice', row[3])
     val = row[4] * (curr / row[3])
@@ -749,31 +758,32 @@ def cmd_historique(message):
 def cmd_stats(message):
     rows = db_fetchall("SELECT profit_loss FROM trades WHERE chat_id=?", (message.chat.id,))
     if not rows:
-        bot.reply_to(message, "📊 Pas de stats")
+        bot.reply_to(message, "📊 Pas de statistiques")
         return
     wins = sum(1 for r in rows if r[0] > 0)
     total = sum(r[0] for r in rows)
-    msg = f"📊 *STATS*\n📈 Trades: {len(rows)}\n✅ Win: {wins/len(rows)*100:.1f}%\n💰 P&L: {total:.2f}€\n🏆 Best: {max(r[0] for r in rows):.2f}€\n💀 Worst: {min(r[0] for r in rows):.2f}€"
+    msg = f"📊 *STATISTIQUES*\n📈 Trades: {len(rows)}\n✅ Win rate: {wins/len(rows)*100:.1f}%\n💰 P&L total: {total:.2f}€\n🏆 Meilleur: {max(r[0] for r in rows):.2f}€\n💀 Pire: {min(r[0] for r in rows):.2f}€"
     bot.reply_to(message, msg, parse_mode='Markdown')
 
 @bot.message_handler(commands=['alerte'])
 def cmd_alerte(message):
     try:
         _, ticker, price = message.text.split()
-        db_execute("INSERT INTO alerts (chat_id, ticker, target_price, date) VALUES (?,?,?,?)", (message.chat.id, ticker.upper(), float(price), datetime.now().isoformat()))
-        bot.reply_to(message, f"🔔 Alerte {ticker.upper()} à ${price}")
+        db_execute("INSERT INTO alerts (chat_id, ticker, target_price, date) VALUES (?,?,?,?)",
+                   (message.chat.id, ticker.upper(), float(price), datetime.now().isoformat()))
+        bot.reply_to(message, f"🔔 Alerte créée : {ticker.upper()} à ${price}")
     except:
         bot.reply_to(message, "❌ /alerte AAPL 200")
 
 @bot.message_handler(commands=['import_csv'])
 def cmd_import_csv(message):
-    msg = bot.reply_to(message, "📁 Envoyez le CSV")
+    msg = bot.reply_to(message, "📁 Envoyez votre fichier CSV (Action,Quantité,Prix)")
     bot.register_next_step_handler(msg, process_csv)
 
 def process_csv(message):
     content = message.document and bot.download_file(bot.get_file(message.document.file_id).file_path).decode('utf-8') or message.text
     if not content:
-        bot.reply_to(message, "❌ Vide")
+        bot.reply_to(message, "❌ Contenu vide")
         return
     try:
         count = 0
@@ -786,18 +796,18 @@ def process_csv(message):
                 db_execute("INSERT INTO positions (chat_id, ticker, buy_price, quantity, amount, stop_loss, take_profit1, take_profit2, take_profit3, highest_price, date) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                            (message.chat.id, t.upper(), p, q, amt, round(p*.95,2), round(p*1.1,2), round(p*1.2,2), round(p*1.3,2), p, datetime.now().isoformat()))
                 count += 1
-        bot.reply_to(message, f"✅ {count} positions importées")
+        bot.reply_to(message, f"✅ {count} positions importées avec succès")
     except Exception as e:
-        bot.reply_to(message, f"❌ {e}")
+        bot.reply_to(message, f"❌ Erreur : {e}")
 
-# ===== SURVEILLANCE =====
+# ==================== SURVEILLANCE AUTOMATIQUE ====================
 def auto_scan():
     if not is_market_open():
         return
     movers = scan_all_movers()
     gainers = [m for m in movers if m['change'] >= 20][:5]
     if gainers:
-        msg = "🔔 *ALERTE AUTO*\n\n"
+        msg = "🔔 *ALERTE AUTO - FORTES HAUSSES*\n\n"
         for m in gainers:
             a = get_fast_analysis(m['ticker'])
             stop = a['stop_loss'] if a else round(m['price'] * 0.95, 2)
@@ -818,19 +828,19 @@ def monitor():
                 db_execute('UPDATE positions SET stop_loss=? WHERE id=?', (ns, r[0]))
         if curr <= r[5]:
             try:
-                bot.send_message(r[1], f"🚨 *STOP* {r[2]} ${curr:.2f}", parse_mode='Markdown')
+                bot.send_message(r[1], f"🚨 *STOP LOSS ATTEINT* {r[2]} ${curr:.2f}", parse_mode='Markdown')
             except: pass
         elif curr >= r[8]:
             try:
-                bot.send_message(r[1], f"🎯 *TP3* {r[2]} ${curr:.2f}", parse_mode='Markdown')
+                bot.send_message(r[1], f"🎯 *TP3 ATTEINT* {r[2]} ${curr:.2f}", parse_mode='Markdown')
             except: pass
         elif curr >= r[7]:
             try:
-                bot.send_message(r[1], f"🎯 *TP2* {r[2]} ${curr:.2f}", parse_mode='Markdown')
+                bot.send_message(r[1], f"🎯 *TP2 ATTEINT* {r[2]} ${curr:.2f}", parse_mode='Markdown')
             except: pass
         elif curr >= r[6]:
             try:
-                bot.send_message(r[1], f"🎯 *TP1* {r[2]} ${curr:.2f}", parse_mode='Markdown')
+                bot.send_message(r[1], f"🎯 *TP1 ATTEINT* {r[2]} ${curr:.2f}", parse_mode='Markdown')
             except: pass
 
 def check_critical_drops():
@@ -844,7 +854,7 @@ def check_critical_drops():
             current_value = r[4] * (curr / r[3])
             loss_amount = current_value - amount
             try:
-                bot.send_message(r[1], f"🚨 *BAISSE CRITIQUE*\n{r[2]} {loss_pct:.1f}%\nPerte: {loss_amount:.2f}€", parse_mode='Markdown')
+                bot.send_message(r[1], f"🚨 *BAISSE CRITIQUE* {r[2]} {loss_pct:.1f}%\nPerte: {loss_amount:.2f}€", parse_mode='Markdown')
             except: pass
 
 def hourly_top_movers():
@@ -877,13 +887,13 @@ def webhook():
 
 @app.route('/')
 def home():
-    return "Bot Trader Pro v8 Enrichi - OK", 200
+    return "Bot Trader Pro - Opérationnel", 200
 
 if __name__ == '__main__':
-    print("Demarrage Bot Trader Pro v8 (Enrichi)...")
+    print("🚀 Démarrage du bot révolutionnaire...")
     bot.remove_webhook()
     time.sleep(0.5)
     bot.set_webhook(url=WEBHOOK_URL + '/webhook')
-    print(f"Bot sur {WEBHOOK_URL}")
+    print(f"✅ Bot connecté sur {WEBHOOK_URL}")
     threading.Thread(target=run_scheduler, daemon=True).start()
     app.run(host='0.0.0.0', port=PORT)

@@ -175,43 +175,96 @@ def get_fast_analysis(ticker):
         return None
 
 def scan_all_movers():
-    """Scan rapide avec Finnhub (prix) + fallback yfinance"""
     movers = []
-    for ticker in HIGH_GROWTH_STOCKS:
+    # --- Essayer Finnhub d'abord (si la clé fonctionne) ---
+    finnhub_ok = False
+    if FINNHUB_KEY:
         try:
-            # Essayer Finnhub d'abord
-            current = get_current_price_finnhub(ticker)
-            previous = None
-            if current:
-                # obtenir le previous close via Finnhub (pc)
+            test_url = f"https://finnhub.io/api/v1/quote?symbol=AAPL&token={FINNHUB_KEY}"
+            test_resp = requests.get(test_url, timeout=5).json()
+            if 'c' in test_resp and test_resp['c'] > 0:
+                finnhub_ok = True
+        except:
+            pass
+
+    if finnhub_ok:
+        # Mode Finnhub (rapide et fiable)
+        for ticker in HIGH_GROWTH_STOCKS:
+            try:
                 url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_KEY}"
                 resp = requests.get(url, timeout=5).json()
-                previous = resp.get('pc', 0)
-                volume = resp.get('v', 0)
-            if not current or not previous:
-                # fallback yfinance
-                df = yf.download(ticker, period='2d', progress=False)
-                if len(df) >= 2:
-                    current = df['Close'].iloc[-1]
-                    previous = df['Close'].iloc[-2]
-                    volume = int(df['Volume'].iloc[-1]) if 'Volume' in df else 0
-                else:
+                if 'c' not in resp or resp['c'] == 0:
                     continue
-            if current and previous and current > 0 and previous > 0:
+                current = resp['c']
+                previous = resp.get('pc', 0)
+                if previous == 0:
+                    continue
                 change = ((current - previous) / previous) * 100
+                volume = resp.get('v', 0)
                 movers.append({
                     'ticker': ticker,
                     'name': ticker,
-                    'price': round(current, 3),
+                    'price': current,
                     'change': round(change, 2),
                     'volume': volume
                 })
-        except:
-            pass
-        time.sleep(0.05)  # respecter limite Finnhub
+            except:
+                pass
+            time.sleep(0.05)  # respecter la limite Finnhub
+    else:
+        # Fallback Yahoo Finance (batch)
+        tickers = HIGH_GROWTH_STOCKS.copy()
+        try:
+            data = yf.download(tickers, period='2d', progress=False, group_by='ticker')
+            # yfinance peut retourner un DataFrame multi-niveaux ou simple
+            if not data.empty:
+                for ticker in tickers:
+                    try:
+                        # Extraction selon la structure
+                        if len(tickers) == 1:
+                            close_series = data['Close']
+                        else:
+                            close_series = data[ticker]['Close'] if ticker in data.columns.levels[0] else None
+                        if close_series is None or len(close_series) < 2:
+                            continue
+                        curr = close_series.iloc[-1]
+                        prev = close_series.iloc[-2]
+                        change = ((curr - prev) / prev) * 100
+                        vol_series = data[ticker]['Volume'] if ticker in data.columns.levels[0] else None
+                        volume = int(vol_series.iloc[-1]) if vol_series is not None and len(vol_series) > 0 else 0
+                        movers.append({
+                            'ticker': ticker,
+                            'name': ticker,
+                            'price': round(curr, 3),
+                            'change': round(change, 2),
+                            'volume': volume
+                        })
+                    except:
+                        pass
+        except Exception as e:
+            print(f"Batch yfinance failed: {e}")
+            # Fallback individuel
+            for ticker in tickers:
+                try:
+                    df = yf.download(ticker, period='2d', progress=False)
+                    if len(df) >= 2:
+                        curr = df['Close'].iloc[-1]
+                        prev = df['Close'].iloc[-2]
+                        change = ((curr - prev) / prev) * 100
+                        volume = int(df['Volume'].iloc[-1]) if 'Volume' in df else 0
+                        movers.append({
+                            'ticker': ticker,
+                            'name': ticker,
+                            'price': round(curr, 3),
+                            'change': round(change, 2),
+                            'volume': volume
+                        })
+                except:
+                    pass
+
     movers.sort(key=lambda x: x['change'], reverse=True)
     return movers
-
+   
 def get_tomorrow_recommendations():
     # même logique qu'avant, on garde yfinance pour les infos
     recommendations = []

@@ -310,6 +310,127 @@ def send_alert_to_all(msg):
         except:
             pass
 
+# ===== NOUVELLES FONCTIONS D'ANALYSE ENRICHIE =====
+def get_company_news(ticker):
+    """Récupère les 5 dernières news via Finnhub"""
+    try:
+        today = datetime.now().strftime('%Y-%m-%d')
+        week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+        url = f"https://finnhub.io/api/v1/company-news?symbol={ticker}&from={week_ago}&to={today}&token={FINNHUB_KEY}"
+        resp = requests.get(url, timeout=5).json()
+        if isinstance(resp, list) and len(resp) > 0:
+            return resp[:5]
+        return []
+    except:
+        return []
+
+def analyze_sentiment(news):
+    """Analyse basique du sentiment des titres"""
+    positive_words = ['profit', 'growth', 'rise', 'gain', 'buy', 'upgrade', 'beat', 'positive', 'record']
+    negative_words = ['loss', 'decline', 'fall', 'drop', 'sell', 'downgrade', 'miss', 'negative', 'risk']
+    pos_count = 0
+    neg_count = 0
+    for article in news:
+        title = (article.get('headline', '') + ' ' + article.get('summary', '')).lower()
+        pos_count += sum(1 for w in positive_words if w in title)
+        neg_count += sum(1 for w in negative_words if w in title)
+    if pos_count > neg_count:
+        return "🟢 Positif"
+    elif neg_count > pos_count:
+        return "🔴 Négatif"
+    else:
+        return "🟡 Neutre"
+
+def get_detailed_analysis(ticker):
+    """Analyse enrichie avec fondamentaux et actualités"""
+    try:
+        current_price = get_current_price_finnhub(ticker)
+        if not current_price:
+            info = get_yahoo_info(ticker)
+            current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
+        else:
+            info = get_yahoo_info(ticker)
+
+        if not current_price or current_price == 0:
+            return None
+
+        previous_close = info.get('previousClose', current_price)
+        change_pct = ((current_price - previous_close) / previous_close) * 100
+
+        # Fondamentaux
+        pe_ratio = info.get('trailingPE', info.get('forwardPE', 'N/A'))
+        eps = info.get('trailingEps', 'N/A')
+        roe = info.get('returnOnEquity', 'N/A')
+        if roe != 'N/A':
+            roe = f"{roe * 100:.1f}%" if isinstance(roe, (int, float)) else roe
+        debt_to_equity = info.get('debtToEquity', 'N/A')
+        revenue_growth = info.get('revenueGrowth', 'N/A')
+        if revenue_growth != 'N/A':
+            revenue_growth = f"{revenue_growth * 100:.1f}%" if isinstance(revenue_growth, (int, float)) else revenue_growth
+        profit_margin = info.get('profitMargins', 'N/A')
+        if profit_margin != 'N/A':
+            profit_margin = f"{profit_margin * 100:.1f}%" if isinstance(profit_margin, (int, float)) else profit_margin
+        market_cap = info.get('marketCap', 0)
+        dividend_yield = info.get('dividendYield', 'N/A')
+        if dividend_yield != 'N/A' and dividend_yield is not None:
+            dividend_yield = f"{dividend_yield * 100:.2f}%"
+
+        # Consensus analystes
+        target_mean = info.get('targetMeanPrice', None)
+        target_high = info.get('targetHighPrice', None)
+        target_low = info.get('targetLowPrice', None)
+        recommendation = info.get('recommendationKey', 'N/A')
+
+        volume = info.get('volume', 0)
+        avg_volume = info.get('averageVolume', 0)
+        vol_ratio = volume / avg_volume if avg_volume > 0 else 1
+
+        score = 50
+        if change_pct > 0: score += 10
+        if change_pct > 5: score += 10
+        if vol_ratio > 1: score += 10
+        if vol_ratio > 2: score += 10
+        if volume > 1000000: score += 10
+        score = min(100, score)
+
+        atr = current_price * 0.03
+        stop_loss = round(current_price - 2 * atr, 2)
+        tp1 = round(current_price + 2 * atr, 2)
+        tp2 = round(current_price + 4 * atr, 2)
+        tp3 = round(current_price + 6 * atr, 2)
+
+        if score >= 80: pot10, pot20, pot30 = 75, 55, 35
+        elif score >= 65: pot10, pot20, pot30 = 60, 40, 25
+        elif score >= 50: pot10, pot20, pot30 = 45, 30, 15
+        else: pot10, pot20, pot30 = 30, 20, 10
+
+        news = get_company_news(ticker)
+        sentiment = analyze_sentiment(news) if news else "N/A"
+
+        name = info.get('shortName', info.get('longName', ticker))
+        isin = info.get('isin', 'N/A')
+        sector = info.get('sector', 'N/A')
+        industry = info.get('industry', 'N/A')
+
+        return {
+            'ticker': ticker, 'name': str(name)[:40], 'isin': isin,
+            'sector': sector, 'industry': industry,
+            'price': round(current_price, 3), 'change_pct': round(change_pct, 2),
+            'vol_ratio': round(vol_ratio, 1), 'volume': volume, 'score': score,
+            'stop_loss': stop_loss, 'tp1': tp1, 'tp2': tp2, 'tp3': tp3,
+            'potential_10': pot10, 'potential_20': pot20, 'potential_30': pot30,
+            'pe_ratio': pe_ratio, 'eps': eps, 'roe': roe,
+            'debt_to_equity': debt_to_equity, 'revenue_growth': revenue_growth,
+            'profit_margin': profit_margin, 'market_cap': market_cap,
+            'dividend_yield': dividend_yield,
+            'target_mean': target_mean, 'target_high': target_high,
+            'target_low': target_low, 'recommendation': recommendation,
+            'news': news, 'sentiment': sentiment
+        }
+    except Exception as e:
+        print(f"Erreur analyse détaillée {ticker}: {e}")
+        return None
+
 # ===== COMMANDES =====
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
@@ -464,31 +585,65 @@ def cmd_analyse(message):
     except:
         bot.reply_to(message, "❌ /analyse AAPL")
         return
+
     bot.send_chat_action(message.chat.id, 'typing')
-    a = get_fast_analysis(ticker)
+    a = get_detailed_analysis(ticker)
     if not a:
         bot.reply_to(message, f"❌ Données indisponibles pour {ticker}")
         return
+
     msg = f"📊 *{a['name']} ({a['ticker']})*\n"
-    msg += f"🔖 ISIN: `{a['isin']}`\n\n"
-    msg += f"⭐ Score: {a['score']}/100\n"
-    msg += f"💰 Prix: ${a['price']}\n"
-    msg += f"📈 Variation: {a['change_pct']:+.2f}%\n"
-    msg += f"📊 Volume: {a['vol_ratio']}x moyenne\n\n"
-    msg += f"🎯 *Potentiel estimé :*\n"
+    msg += f"🔖 ISIN: `{a['isin']}`\n"
+    msg += f"🏭 {a['sector']} | {a['industry']}\n\n"
+
+    msg += f"⭐ *Score technique : {a['score']}/100*\n"
+    msg += f"💰 Prix : ${a['price']} ({a['change_pct']:+.2f}%)\n"
+    msg += f"📊 Volume : {a['vol_ratio']}x moyenne\n\n"
+
+    # Fondamentaux
+    msg += "📈 *Fondamentaux :*\n"
+    msg += f"• PER : {a['pe_ratio']} | BPA : {a['eps']}\n"
+    msg += f"• ROE : {a['roe']} | Marge nette : {a['profit_margin']}\n"
+    msg += f"• Croissance CA : {a['revenue_growth']} | Dette/Equity : {a['debt_to_equity']}\n"
+    msg += f"• Dividende : {a['dividend_yield']} | Cap. boursière : {a['market_cap']:,} $\n\n"
+
+    # Consensus
+    if a['target_mean']:
+        msg += "🎯 *Consensus analystes :*\n"
+        msg += f"• Objectif moyen : ${a['target_mean']:.2f} (potentiel {((a['target_mean']/a['price'])-1)*100:+.1f}%)\n"
+        msg += f"• Fourchette : ${a['target_low']:.2f} - ${a['target_high']:.2f}\n"
+        msg += f"• Recommandation : {a['recommendation']}\n\n"
+
+    # Potentiel estimé
+    msg += "🎲 *Potentiel estimé (analyse technique) :*\n"
     msg += f"• +10% : {a['potential_10']}% de probabilité\n"
     msg += f"• +20% : {a['potential_20']}% de probabilité\n"
     msg += f"• +30% : {a['potential_30']}% de probabilité\n\n"
-    msg += f"🛡️ *Gestion du risque :*\n"
-    msg += f"🛑 Stop-loss : ${a['stop_loss']}\n"
-    msg += f"🎯 TP1 : ${a['tp1']}\n"
-    msg += f"🎯 TP2 : ${a['tp2']}\n"
-    msg += f"🎯 TP3 : ${a['tp3']}"
+
+    # Risque
+    msg += "🛡️ *Gestion du risque :*\n"
+    msg += f"🛑 Stop-loss : ${a['stop_loss']} (-{round((1-a['stop_loss']/a['price'])*100,1)}%)\n"
+    msg += f"🎯 TP1 : ${a['tp1']} (+{round((a['tp1']/a['price']-1)*100,1)}%)\n"
+    msg += f"🎯 TP2 : ${a['tp2']} (+{round((a['tp2']/a['price']-1)*100,1)}%)\n"
+    msg += f"🎯 TP3 : ${a['tp3']} (+{round((a['tp3']/a['price']-1)*100,1)}%)\n\n"
+
+    # Actualités
+    if a['news']:
+        msg += f"📰 *Actualités récentes (7j) - Sentiment {a['sentiment']} :*\n"
+        for i, article in enumerate(a['news'][:3], 1):
+            headline = article.get('headline', 'Pas de titre')[:80]
+            source = article.get('source', '')
+            msg += f"  {i}. {headline}\n"
+        msg += "\n"
+
+    # Avertissement
+    msg += "⚠️ *Avertissement :* Cette analyse est basée sur des données historiques et des estimations. Ne constitue pas un conseil en investissement."
+
     markup = types.InlineKeyboardMarkup()
     markup.add(
         types.InlineKeyboardButton("🛒 ACHETER", callback_data=f"buy_{ticker}_{a['price']}"),
         types.InlineKeyboardButton("❌ PASSER", callback_data="pass")
-    )
+
     bot.reply_to(message, msg, parse_mode='Markdown', reply_markup=markup)
 
 # Callbacks & commandes de trading (inchangées)

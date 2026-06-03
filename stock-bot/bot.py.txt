@@ -438,6 +438,18 @@ def cmd_aide(message):
 def cmd_ping(message):
     bot.reply_to(message, "pong")
 
+@bot.message_handler(commands=['debug'])
+def cmd_debug(message):
+    try:
+        with open(__file__, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        # Envoie les 5 premières lignes et les 5 dernières
+        debut = ''.join(lines[:5])
+        fin = ''.join(lines[-5:])
+        bot.reply_to(message, f"🔍 *Début du fichier :*\n```\n{debut}```\n🔚 *Fin du fichier :*\n```\n{fin}```", parse_mode='Markdown')
+    except Exception as e:
+        bot.reply_to(message, f"Erreur : {e}")
+
 @bot.message_handler(commands=['setrange'])
 def cmd_setrange(message):
     try:

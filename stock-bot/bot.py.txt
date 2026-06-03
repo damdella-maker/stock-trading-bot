@@ -438,10 +438,6 @@ def cmd_aide(message):
 def cmd_ping(message):
     bot.reply_to(message, "pong")
 
-@bot.message_handler(commands=['version'])
-def cmd_version(message):
-    bot.reply_to(message, "Nouvelle version active : RÉVOLUTIONNAIRE")
-
 @bot.message_handler(commands=['setrange'])
 def cmd_setrange(message):
     try:

@@ -92,15 +92,15 @@ def is_market_open():
     try:
         tz = pytz.timezone('US/Eastern')
         now_us = datetime.now(tz)
-        if now_us.weekday() >= 5:  # samedi/dimanche
+        if now_us.weekday() >= 5:
             return False
         market_open = now_us.replace(hour=9, minute=30, second=0, microsecond=0)
         market_close = now_us.replace(hour=16, minute=0, second=0, microsecond=0)
         return market_open <= now_us <= market_close
     except:
-        return True  # en cas de doute on laisse passer
+        return True
 
-# === Fonctions d'accès aux données (Finnhub + yfinance) ===
+# === Fonctions d'accès aux données ===
 def get_current_price_finnhub(ticker):
     try:
         url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_KEY}"
@@ -120,22 +120,23 @@ def get_yahoo_info(ticker):
         return {}
 
 def get_fast_analysis(ticker):
-    """Analyse rapide : prix via Finnhub, infos via yfinance"""
+    """Analyse rapide (prix, volume, score, stop/tp)"""
     try:
         current_price = get_current_price_finnhub(ticker)
         if not current_price:
-            # fallback yfinance
             info = get_yahoo_info(ticker)
             current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
-            if not current_price:
-                return None
         else:
             info = get_yahoo_info(ticker)
+        if not current_price or current_price == 0:
+            return None
+
         previous_close = info.get('previousClose', current_price)
         change_pct = ((current_price - previous_close) / previous_close) * 100 if previous_close else 0
         volume = info.get('volume', 0)
         avg_volume = info.get('averageVolume', 0)
         vol_ratio = volume / avg_volume if avg_volume > 0 else 1
+
         score = 50
         if change_pct > 0: score += 10
         if change_pct > 5: score += 10
@@ -143,15 +144,17 @@ def get_fast_analysis(ticker):
         if vol_ratio > 2: score += 10
         if volume > 1000000: score += 10
         score = min(100, score)
+
         atr = current_price * 0.03
         stop_loss = round(current_price - 2 * atr, 2)
         tp1 = round(current_price + 2 * atr, 2)
         tp2 = round(current_price + 4 * atr, 2)
         tp3 = round(current_price + 6 * atr, 2)
+
         name = info.get('shortName', info.get('longName', ticker))
         isin = info.get('isin', 'N/A')
         sector = info.get('sector', 'N/A')
-        # potentiel
+
         if score >= 80:
             pot10, pot20, pot30 = 75, 55, 35
         elif score >= 65:
@@ -160,6 +163,7 @@ def get_fast_analysis(ticker):
             pot10, pot20, pot30 = 45, 30, 15
         else:
             pot10, pot20, pot30 = 30, 20, 10
+
         return {
             'ticker': ticker, 'name': str(name)[:40], 'isin': isin, 'sector': sector,
             'price': round(current_price, 3), 'change_pct': round(change_pct, 2),
@@ -171,12 +175,11 @@ def get_fast_analysis(ticker):
             'risk_reward': 2.0, 'industry': sector, 'market_cap': 0
         }
     except Exception as e:
-        print(f"Erreur analyse {ticker}: {e}")
+        print(f"Erreur get_fast_analysis {ticker}: {e}")
         return None
 
 def scan_all_movers():
     movers = []
-    # --- Essayer Finnhub d'abord (si la clé fonctionne) ---
     finnhub_ok = False
     if FINNHUB_KEY:
         try:
@@ -188,7 +191,6 @@ def scan_all_movers():
             pass
 
     if finnhub_ok:
-        # Mode Finnhub (rapide et fiable)
         for ticker in HIGH_GROWTH_STOCKS:
             try:
                 url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_KEY}"
@@ -202,17 +204,13 @@ def scan_all_movers():
                 change = ((current - previous) / previous) * 100
                 volume = resp.get('v', 0)
                 movers.append({
-                    'ticker': ticker,
-                    'name': ticker,
-                    'price': current,
-                    'change': round(change, 2),
-                    'volume': volume
+                    'ticker': ticker, 'name': ticker,
+                    'price': current, 'change': round(change, 2), 'volume': volume
                 })
             except:
                 pass
-            time.sleep(0.05)  # respecter la limite Finnhub
+            time.sleep(0.05)
     else:
-        # Fallback Yahoo Finance (batch)
         tickers = HIGH_GROWTH_STOCKS.copy()
         try:
             data = yf.download(tickers, period='2d', progress=False, group_by='ticker')
@@ -231,11 +229,8 @@ def scan_all_movers():
                         vol_series = data[ticker]['Volume'] if ticker in data.columns.levels[0] else None
                         volume = int(vol_series.iloc[-1]) if vol_series is not None and len(vol_series) > 0 else 0
                         movers.append({
-                            'ticker': ticker,
-                            'name': ticker,
-                            'price': round(curr, 3),
-                            'change': round(change, 2),
-                            'volume': volume
+                            'ticker': ticker, 'name': ticker,
+                            'price': round(curr, 3), 'change': round(change, 2), 'volume': volume
                         })
                     except:
                         pass
@@ -250,11 +245,8 @@ def scan_all_movers():
                         change = ((curr - prev) / prev) * 100
                         volume = int(df['Volume'].iloc[-1]) if 'Volume' in df else 0
                         movers.append({
-                            'ticker': ticker,
-                            'name': ticker,
-                            'price': round(curr, 3),
-                            'change': round(change, 2),
-                            'volume': volume
+                            'ticker': ticker, 'name': ticker,
+                            'price': round(curr, 3), 'change': round(change, 2), 'volume': volume
                         })
                 except:
                     pass
@@ -269,7 +261,8 @@ def get_tomorrow_recommendations():
             info = get_yahoo_info(ticker)
             current = info.get('currentPrice', info.get('regularMarketPrice', 0))
             previous = info.get('previousClose', 0)
-            if not current or not previous: continue
+            if not current or not previous:
+                continue
             change_today = ((current - previous) / previous) * 100
             volume = info.get('volume', 0)
             avg_volume = info.get('averageVolume', 0)
@@ -346,21 +339,22 @@ def get_detailed_analysis(ticker):
     except:
         info = {}
 
+    # Fondamentaux
     pe_ratio = info.get('trailingPE', info.get('forwardPE', 'N/A'))
     eps = info.get('trailingEps', 'N/A')
     roe = info.get('returnOnEquity', 'N/A')
-    if roe != 'N/A':
-        roe = f"{roe * 100:.1f}%" if isinstance(roe, (int, float)) else roe
+    if roe != 'N/A' and isinstance(roe, (int, float)):
+        roe = f"{roe * 100:.1f}%"
     debt_to_equity = info.get('debtToEquity', 'N/A')
     revenue_growth = info.get('revenueGrowth', 'N/A')
-    if revenue_growth != 'N/A':
-        revenue_growth = f"{revenue_growth * 100:.1f}%" if isinstance(revenue_growth, (int, float)) else revenue_growth
+    if revenue_growth != 'N/A' and isinstance(revenue_growth, (int, float)):
+        revenue_growth = f"{revenue_growth * 100:.1f}%"
     profit_margin = info.get('profitMargins', 'N/A')
-    if profit_margin != 'N/A':
-        profit_margin = f"{profit_margin * 100:.1f}%" if isinstance(profit_margin, (int, float)) else profit_margin
+    if profit_margin != 'N/A' and isinstance(profit_margin, (int, float)):
+        profit_margin = f"{profit_margin * 100:.1f}%"
     market_cap = info.get('marketCap', 0)
     dividend_yield = info.get('dividendYield', 'N/A')
-    if dividend_yield != 'N/A' and dividend_yield is not None:
+    if dividend_yield != 'N/A' and dividend_yield is not None and isinstance(dividend_yield, (int, float)):
         dividend_yield = f"{dividend_yield * 100:.2f}%"
 
     target_mean = info.get('targetMeanPrice', None)
@@ -371,6 +365,7 @@ def get_detailed_analysis(ticker):
     news = get_company_news(ticker)
     sentiment = analyze_sentiment(news) if news else "N/A"
 
+    # Fusion avec les données de base
     detailed = {**base,
                 'pe_ratio': pe_ratio, 'eps': eps, 'roe': roe,
                 'debt_to_equity': debt_to_equity, 'revenue_growth': revenue_growth,
@@ -379,24 +374,24 @@ def get_detailed_analysis(ticker):
                 'target_mean': target_mean, 'target_high': target_high,
                 'target_low': target_low, 'recommendation': recommendation,
                 'news': news, 'sentiment': sentiment,
-                'sector': info.get('sector', 'N/A'),
-                'industry': info.get('industry', 'N/A'),
+                'sector': info.get('sector', base['sector']),
+                'industry': info.get('industry', base['industry']),
                 'name': info.get('shortName', info.get('longName', ticker)) or base['name'],
-                'isin': info.get('isin', 'N/A')}
+                'isin': info.get('isin', base['isin'])}
     return detailed
 
 # ===== COMMANDES =====
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     add_subscriber(message.chat.id)
-    msg = "🚀 *TRADER PRO V8 - FINNHUB*\n\n"
-    msg += "✅ Données via Finnhub (quasi direct)\n\n"
+    msg = "🚀 *TRADER PRO V8 - ENRICHIE*\n\n"
+    msg += "✅ Analyse détaillée avec fondamentaux, actualités et consensus\n\n"
     msg += "📊 /rapide - Top gainers\n"
     msg += "📊 /scan - Scan filtre\n"
     msg += "📊 /scan20 - Potentiel 20-50%\n"
     msg += "📊 /scan50 - Potentiel >50%\n"
     msg += "📊 /allmovers - Tous mouvements\n"
-    msg += "📊 /analyse TICKER - Rapport + potentiel\n"
+    msg += "📊 /analyse TICKER - Rapport complet enrichi\n"
     msg += "💥 /explosive - Top opportunites\n"
     msg += "📈 /marche - Indices\n"
     msg += "📅 /demain - Top 5 demain\n"
@@ -405,7 +400,8 @@ def cmd_start(message):
     msg += "📋 /historique - Historique\n"
     msg += "📊 /stats - Performance\n"
     msg += "⚙️ /setrange MIN MAX - Filtre\n"
-    msg += "📚 /aide - Guide"
+    msg += "📚 /aide - Guide\n"
+    msg += "🏓 /ping - Test de vie"
     bot.reply_to(message, msg, parse_mode='Markdown')
 
 @bot.message_handler(commands=['aide'])
@@ -415,7 +411,7 @@ def cmd_aide(message):
     msg += "/scan - Scan avec filtre\n"
     msg += "/scan20 - 20-50%\n"
     msg += "/scan50 - >50%\n"
-    msg += "/analyse TICKER - Rapport + potentiel\n"
+    msg += "/analyse TICKER - Rapport enrichi\n"
     msg += "/demain - Top 5 demain\n"
     msg += "/achat TICKER PRIX MONTANT\n"
     msg += "/portfolio - Positions\n"
@@ -424,8 +420,13 @@ def cmd_aide(message):
     msg += "/stats - Statistiques\n"
     msg += "/alerte TICKER PRIX - Alerte\n"
     msg += "/import_csv - Import CSV\n"
-    msg += "/setrange MIN MAX - Filtre"
+    msg += "/setrange MIN MAX - Filtre\n"
+    msg += "/ping - Test"
     bot.reply_to(message, msg, parse_mode='Markdown')
+
+@bot.message_handler(commands=['ping'])
+def cmd_ping(message):
+    bot.reply_to(message, "pong")
 
 @bot.message_handler(commands=['setrange'])
 def cmd_setrange(message):
@@ -876,10 +877,10 @@ def webhook():
 
 @app.route('/')
 def home():
-    return "Bot Trader Pro v8 Finnhub - OK", 200
+    return "Bot Trader Pro v8 Enrichi - OK", 200
 
 if __name__ == '__main__':
-    print("Demarrage Bot Trader Pro v8 (Finnhub)...")
+    print("Demarrage Bot Trader Pro v8 (Enrichi)...")
     bot.remove_webhook()
     time.sleep(0.5)
     bot.set_webhook(url=WEBHOOK_URL + '/webhook')

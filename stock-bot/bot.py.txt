@@ -600,34 +600,29 @@ def cmd_analyse(message):
     msg += f"💰 Prix : ${a['price']} ({a['change_pct']:+.2f}%)\n"
     msg += f"📊 Volume : {a['vol_ratio']}x moyenne\n\n"
 
-    # Fondamentaux
     msg += "📈 *Fondamentaux :*\n"
     msg += f"• PER : {a['pe_ratio']} | BPA : {a['eps']}\n"
     msg += f"• ROE : {a['roe']} | Marge nette : {a['profit_margin']}\n"
     msg += f"• Croissance CA : {a['revenue_growth']} | Dette/Equity : {a['debt_to_equity']}\n"
     msg += f"• Dividende : {a['dividend_yield']} | Cap. boursière : {a['market_cap']:,} $\n\n"
 
-    # Consensus
     if a['target_mean']:
         msg += "🎯 *Consensus analystes :*\n"
         msg += f"• Objectif moyen : ${a['target_mean']:.2f} (potentiel {((a['target_mean']/a['price'])-1)*100:+.1f}%)\n"
         msg += f"• Fourchette : ${a['target_low']:.2f} - ${a['target_high']:.2f}\n"
         msg += f"• Recommandation : {a['recommendation']}\n\n"
 
-    # Potentiel estimé
     msg += "🎲 *Potentiel estimé (analyse technique) :*\n"
     msg += f"• +10% : {a['potential_10']}% de probabilité\n"
     msg += f"• +20% : {a['potential_20']}% de probabilité\n"
     msg += f"• +30% : {a['potential_30']}% de probabilité\n\n"
 
-    # Risque
     msg += "🛡️ *Gestion du risque :*\n"
     msg += f"🛑 Stop-loss : ${a['stop_loss']} (-{round((1-a['stop_loss']/a['price'])*100,1)}%)\n"
     msg += f"🎯 TP1 : ${a['tp1']} (+{round((a['tp1']/a['price']-1)*100,1)}%)\n"
     msg += f"🎯 TP2 : ${a['tp2']} (+{round((a['tp2']/a['price']-1)*100,1)}%)\n"
     msg += f"🎯 TP3 : ${a['tp3']} (+{round((a['tp3']/a['price']-1)*100,1)}%)\n\n"
 
-    # Actualités
     if a['news']:
         msg += f"📰 *Actualités récentes (7j) - Sentiment {a['sentiment']} :*\n"
         for i, article in enumerate(a['news'][:3], 1):
@@ -636,14 +631,13 @@ def cmd_analyse(message):
             msg += f"  {i}. {headline}\n"
         msg += "\n"
 
-    # Avertissement
     msg += "⚠️ *Avertissement :* Cette analyse est basée sur des données historiques et des estimations. Ne constitue pas un conseil en investissement."
 
     markup = types.InlineKeyboardMarkup()
     markup.add(
         types.InlineKeyboardButton("🛒 ACHETER", callback_data=f"buy_{ticker}_{a['price']}"),
         types.InlineKeyboardButton("❌ PASSER", callback_data="pass")
-
+    )
     bot.reply_to(message, msg, parse_mode='Markdown', reply_markup=markup)
 
 # Callbacks & commandes de trading (inchangées)
